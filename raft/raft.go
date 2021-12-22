@@ -16,9 +16,20 @@ package raft
 
 import (
 	"errors"
+	"log"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 // None is a placeholder node ID used when there is no leader.
 const None uint64 = 0
@@ -157,6 +168,10 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	/***************下面是自定义的属性***********************/
+	//随机选举超时，为了避免live lock的问题
+	randomElectionTimeout int
 }
 
 // newRaft return a raft peer with the given config
@@ -165,40 +180,167 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	raftlog := newLog(c.Storage)
+	//这里相当于论文定义的next index和match index
+	//TODO:这里需要读持久化的数据
+	prs := make(map[uint64]*Progress)
+	for _, peerId := range c.peers {
+		if peerId != c.ID {
+			prs[peerId] = &Progress{0, 1}
+		}
+	}
+	raft := Raft{
+		id: c.ID,
+		//TODO:读持久化存储
+		Term:             0,
+		Vote:             0,
+		RaftLog:          raftlog,
+		Prs:              prs,
+		State:            StateFollower,
+		votes:            make(map[uint64]bool),
+		msgs:             make([]pb.Message, 0),
+		Lead:             0,
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout:  c.ElectionTick,
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
+		leadTransferee:   0,
+		PendingConfIndex: 0,
+	}
+	raft.resetRandomElectionTimeout()
+	return &raft
+}
+
+//更新随机超时时间
+func (r *Raft) resetRandomElectionTimeout() {
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	progress := r.Prs[to]
+	preLogIdx := progress.Next - 1
+	preLogTerm, _ := r.RaftLog.Term(preLogIdx)
+	message := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		//下面这两个其实应该命名为PreLogTerm和PreLogIndex
+		LogTerm:  preLogTerm,
+		Index:    preLogIdx,
+		Entries:  r.RaftLog.slice(progress.Next),
+		Commit:   r.RaftLog.committed,
+		Snapshot: nil,
+	}
+	r.send(message)
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		//LogTerm:  preLog.Term,
+		//Index:    preLog.Index,
+		//Entries:  r.RaftLog.StartWith(prs.Next),
+		//Commit:   r.commitIndex,
+	}
+	DPrintf("send heartbeat...from:%d,to:%d,msg:%+v", msg.From, msg.To, msg)
+	r.send(msg)
+}
+
+func (r *Raft) sendRequestVote(to uint64) {
+	// Your Code Here (2A).
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgRequestVote,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+	}
+	DPrintf("send request vote...from:%d,to:%d,term:%d", msg.From, msg.To, msg.Term)
+	r.send(msg)
 }
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	r.heartbeatElapsed++
+	r.electionElapsed++
+	//选举超时
+	if r.electionElapsed >= r.randomElectionTimeout {
+		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
+		r.electionElapsed = 0
+		return
+	}
+	//心跳定时器
+	if r.State != StateLeader {
+		return
+	}
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		r.Step(pb.Message{
+			MsgType: pb.MessageType_MsgBeat,
+		})
+		r.heartbeatElapsed = 0
+		r.electionElapsed = 0
+	}
+}
+
+func (r *Raft) handleElectionTimeout() {
+	if r.State == StateLeader {
+		return
+	}
+	r.becomeCandidate()
+	for peerId := range r.Prs {
+		r.sendRequestVote(peerId)
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	DPrintf("role change...peerId:%d,term:%d,role:Follower", r.id, term)
+	r.Term = term
+	r.Lead = lead
+	r.State = StateFollower
+	r.Vote = lead
+	r.votes = make(map[uint64]bool)
+	r.heartbeatElapsed = 0
+	r.electionElapsed = 0
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	DPrintf("role change...peerId:%d,role:Candidate", r.id)
+	r.State = StateCandidate
+	r.electionElapsed = 0
+	r.Term++
+	//直接投自己一票
+	r.Vote = r.id
+	r.votes[r.id] = true
+	r.stepCandidate(pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      r.id,
+		From:    r.id,
+		Term:    r.Term,
+	})
+	r.resetRandomElectionTimeout()
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	DPrintf("role change...peerId:%d,role:Leader", r.id)
+	r.Lead = r.id
+	r.State = StateLeader
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -207,8 +349,69 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		r.stepFollower(m)
 	case StateCandidate:
+		r.stepCandidate(m)
 	case StateLeader:
+		r.stepLeader(m)
+	}
+	return nil
+}
+
+func (r *Raft) stepLeader(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgBeat:
+		for peerId := range r.Prs {
+			r.sendHeartbeat(peerId)
+		}
+	case pb.MessageType_MsgHeartbeatResponse:
+		r.handleHeartbeatResp(m)
+	/*case pb.MessageType_MsgHup:
+	r.handleElectionTimeout()*/
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResp(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	}
+	return nil
+}
+
+func (r *Raft) stepCandidate(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		r.handleHeartbeatResp(m)
+	case pb.MessageType_MsgHup:
+		r.handleElectionTimeout()
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResp(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	}
+	return nil
+}
+
+func (r *Raft) stepFollower(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		r.handleElectionTimeout()
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		r.handleHeartbeatResp(m)
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResp(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
 	}
 	return nil
 }
@@ -216,11 +419,135 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	if m.Term < r.Term {
+		r.send(pb.Message{
+			To:      m.From,
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Term:    r.Term,
+			Index:   m.Index,
+			Reject:  true,
+		})
+		return
+	}
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
+		r.send(pb.Message{
+			To:      m.From,
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Term:    r.Term,
+			Index:   m.Index,
+			Reject:  false,
+		})
+		return
+	}
+	//TODO:日志校验
+	if r.State != StateFollower {
+		r.becomeFollower(m.Term, m.From)
+	}
+	r.send(pb.Message{
+		To:      m.From,
+		MsgType: pb.MessageType_MsgAppendResponse,
+		Index:   m.Index,
+		Reject:  false,
+	})
+	//并发/重试导致commit idx已经更新
+	/**
+	if m.Index < r.RaftLog.committed {
+		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.committed})
+		return
+	}
+	if ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index})
+	} else {
+		//这里还需要有加速冲突解决的逻辑
+		r.send(pb.Message{
+			To:      m.From,
+			MsgType: pb.MessageType_MsgAppendResponse,
+			Index:   m.Index,
+			Reject:  true,
+			//LogTerm: hintTerm,
+		})
+	}
+	*/
 }
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	resp := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+	}
+	defer func() {
+		r.msgs = append(r.msgs, resp)
+	}()
+	if m.Term < r.Term {
+		return
+	}
+	if m.Term > r.Term {
+		r.becomeFollower(r.Term, m.From)
+		return
+	}
+	//term相等的场景下先不处理
+}
+
+func (r *Raft) handleHeartbeatResp(m pb.Message) {
+	if m.Term > r.Term {
+		r.becomeFollower(r.Term, m.From)
+	}
+}
+
+func (r *Raft) handleRequestVote(m pb.Message) {
+	// Your Code Here (2A).
+	resp := pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      m.From,
+		From:    r.id,
+		Term:    r.Term,
+		Reject:  true,
+	}
+	defer func() {
+		r.send(resp)
+	}()
+	if r.Term > m.Term {
+		return
+	}
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, m.From)
+		r.Vote = m.From
+		resp.Term = r.Term
+		resp.Reject = false
+		return
+	}
+	//term相同的情况下需要判断是否已经投票
+	if r.Vote <= 0 || r.Vote == m.From {
+		r.Vote = m.From
+		resp.Term = r.Term
+		resp.Reject = false
+		return
+	}
+}
+
+func (r *Raft) handleRequestVoteResp(m pb.Message) {
+	DPrintf("handle request vote resp...msg:%+v,term:%d", m, r.Term)
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, m.From)
+		return
+	}
+	r.votes[m.From] = !m.Reject
+	if !m.Reject {
+		cnt := 0
+		for _, v := range r.votes {
+			if v {
+				cnt++
+			}
+		}
+		if cnt > (len(r.Prs)+1)/2 {
+			r.becomeLeader()
+		}
+	}
 }
 
 // handleSnapshot handle Snapshot RPC request
@@ -236,4 +563,8 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+func (r *Raft) send(m pb.Message) {
+	r.msgs = append(r.msgs, m)
 }

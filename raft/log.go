@@ -56,7 +56,14 @@ type RaftLog struct {
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
-	return nil
+	return &RaftLog{
+		storage:         storage,
+		committed:       0,
+		applied:         0,
+		stabled:         0,
+		entries:         make([]pb.Entry, 0),
+		pendingSnapshot: nil,
+	}
 }
 
 // We need to compact the log entries in some point of time like
@@ -81,11 +88,86 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	//TODO:暂时不考虑snapshot
+	return uint64(len(l.entries) - 1)
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	entry := l.entries[i]
+	return entry.Term, nil
+}
+
+//---------------下面是自行加的方法------------------
+
+func (l *RaftLog) slice(start uint64) []*pb.Entry {
+	if start > l.LastIndex() {
+		panic("idx err...")
+	}
+	if start <= l.stabled {
+		panic("idx err")
+	}
+	idx := start - l.stabled - 1
+	arr := make([]*pb.Entry, 0)
+	for _, log := range l.entries[idx:] {
+		arr = append(arr, &log)
+	}
+	return arr
+}
+
+func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...*pb.Entry) bool {
+	term, _ := l.Term(index)
+	if term != logTerm {
+		return false
+	}
+	l.append(ents...)
+	l.committed = committed
+	return true
+}
+
+func (l *RaftLog) append(ents ...*pb.Entry) uint64 {
+	if len(ents) == 0 {
+		return l.LastIndex()
+	}
+	//更新/覆盖本地日志，不能直接删除后面的日志
+	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
+	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
+	idx := ents[0].Index
+	for _, entry := range ents {
+		//覆盖
+		if idx <= l.LastIndex() {
+			if term, _ := l.Term(idx); term != entry.Term {
+				DPrintf("log conflict,delete log...delete start:%d", idx)
+				l.trimLast(idx)
+				l.entries = append(l.entries, *entry)
+			}
+		} else {
+			l.entries = append(l.entries, *entry)
+		}
+		idx++
+	}
+	return l.LastIndex()
+}
+
+func (l *RaftLog) trimLast(idx uint64) {
+	offset := l.entries[0].Index
+	l.entries = l.entries[idx-offset:]
+}
+
+func (l *RaftLog) findConflict(ents []pb.Entry) uint64 {
+	for _, ne := range ents {
+		if !l.matchTerm(ne.Index, ne.Term) {
+			return ne.Index
+		}
+	}
+	return 0
+}
+
+func (l *RaftLog) matchTerm(i, term uint64) bool {
+	t, err := l.Term(i)
+	if err != nil {
+		return false
+	}
+	return t == term
 }
