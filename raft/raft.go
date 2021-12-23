@@ -247,10 +247,6 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		//LogTerm:  preLog.Term,
-		//Index:    preLog.Index,
-		//Entries:  r.RaftLog.StartWith(prs.Next),
-		//Commit:   r.commitIndex,
 	}
 	DPrintf("send heartbeat...from:%d,to:%d,msg:%+v", msg.From, msg.To, msg)
 	r.send(msg)
@@ -368,8 +364,6 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		}
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResp(m)
-	/*case pb.MessageType_MsgHup:
-	r.handleElectionTimeout()*/
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
