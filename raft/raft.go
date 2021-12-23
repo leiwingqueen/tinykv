@@ -223,6 +223,11 @@ func (r *Raft) sendAppend(to uint64) bool {
 	progress := r.Prs[to]
 	preLogIdx := progress.Next - 1
 	preLogTerm, _ := r.RaftLog.Term(preLogIdx)
+	entries := r.RaftLog.slice(progress.Next, r.RaftLog.LastIndex()+1)
+	ent := make([]*pb.Entry, 0)
+	for _, entry := range entries {
+		ent = append(ent, &entry)
+	}
 	message := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
@@ -231,7 +236,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		//下面这两个其实应该命名为PreLogTerm和PreLogIndex
 		LogTerm:  preLogTerm,
 		Index:    preLogIdx,
-		Entries:  r.RaftLog.slice(progress.Next),
+		Entries:  ent,
 		Commit:   r.RaftLog.committed,
 		Snapshot: nil,
 	}

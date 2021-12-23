@@ -84,6 +84,7 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
+	// 这个方法应该是用于批量把raft log提交到service层
 	return nil
 }
 
@@ -123,19 +124,51 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 
 //---------------下面是自行加的方法------------------
 
-func (l *RaftLog) slice(start uint64) []*pb.Entry {
-	if start > l.LastIndex() {
-		panic("idx err...")
+func (l *RaftLog) firstIndex() uint64 {
+	if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index
 	}
-	if start <= l.stabled {
+	idx, err := l.storage.FirstIndex()
+	if err != nil {
+		panic(err)
+	}
+	return idx
+}
+
+//[start,end)，左闭右开区间
+func (l *RaftLog) slice(lo uint64, hi uint64) []pb.Entry {
+	if lo > hi {
 		panic("idx err")
 	}
-	idx := start - l.stabled - 1
-	arr := make([]*pb.Entry, 0)
-	for _, log := range l.entries[idx:] {
-		arr = append(arr, &log)
+	if lo == hi {
+		return nil
 	}
-	return arr
+	if len(l.entries) == 0 {
+		entries, err := l.storage.Entries(lo, hi)
+		if err != nil {
+			panic(err)
+		}
+		return entries
+	}
+	//stable和unstable的分界
+	offset := l.entries[0].Index
+	var entries []pb.Entry
+	if lo < offset {
+		s1, err := l.storage.Entries(lo, min(hi, offset))
+		if err != nil {
+			panic(err)
+		}
+		entries = s1
+	}
+	if hi > offset {
+		s2 := l.entries[max(offset, lo)-offset : hi-offset]
+		if len(entries) > 0 {
+			copy(s2, entries)
+		} else {
+			entries = s2
+		}
+	}
+	return entries
 }
 
 func (l *RaftLog) maybeAppend(index, logTerm, committed uint64, ents ...*pb.Entry) bool {
