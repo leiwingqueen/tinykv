@@ -10,6 +10,8 @@ RaftLog定义了一个stabled的东西，这个在mit6.824是没有的。
 ```
 这意味着raft log也并不是实时持久化的，先append到内存再批量flush。在mit的课程里面也有提到，如果每次写一个log都fsync到磁盘，从效率上看其实是非常低的。
 
+[storage和unstable的关系](https://jishuin.proginn.com/p/763bfbd2eddb)
+
 ## StateMachine
 在mit的课程上我们并行发送请求是通过go routine实现的，而且在接收各种请求的逻辑上实际上也是一个并发的过程。举个栗子，一个节点当前的term是2，这时候同时发生election timeout和收到一个term=4的心跳包，这两个操作都会对当前节点的term进行修改，我们就必须通过锁来对其进行限制来保证处理结果的正确性。
 然而etcd的设计不一样，etcd把网络通讯、逻辑时钟都从raft的实现上剥离出来。所有这些会对raft状态造成变更的操作都抽象成事件，并且保证这种事件会串行到达一个raft node，用状态机的思路来驱动整个raft的状态变更。我理解这种修改会带来几个好处：

@@ -14,7 +14,9 @@
 
 package raft
 
-import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+import (
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+)
 
 // RaftLog manage the log entries, its struct look like:
 //
@@ -88,15 +90,35 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	//TODO:暂时不考虑snapshot
-	return uint64(len(l.entries) - 1)
+	if len(l.entries) > 0 {
+		return l.entries[len(l.entries)-1].Index
+	}
+	if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index
+	}
+	index, err := l.storage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
+	return index
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	entry := l.entries[i]
-	return entry.Term, nil
+	if len(l.entries) > 0 {
+		//在entries中能查找到
+		offset := l.entries[0].Index
+		if i >= offset && i <= offset+uint64(len(l.entries))-1 {
+			return l.entries[i-offset].Term, nil
+		}
+	}
+	//未持久化的snapshot
+	if l.pendingSnapshot != nil && l.pendingSnapshot.Metadata.Index == i {
+		return l.pendingSnapshot.Metadata.Term, nil
+	}
+	//都找不到只能去storage查找
+	return l.storage.Term(i)
 }
 
 //---------------下面是自行加的方法------------------
