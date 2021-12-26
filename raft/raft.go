@@ -22,7 +22,7 @@ import (
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -428,15 +428,23 @@ func (r *Raft) handleMsgPropose(m pb.Message) {
 		return
 	}
 	r.appendEntry(m.Entries)
+	//同步log到其他结点
+	for peerId := range r.Prs {
+		if peerId != r.id {
+			r.sendAppend(peerId)
+		}
+	}
 }
 
-func (r *Raft) appendEntry(ents []*pb.Entry) {
+func (r *Raft) appendEntry(es []*pb.Entry) {
 	//统一生成term和index
 	last := r.RaftLog.LastIndex()
-	for i, ent := range ents {
+	for i, ent := range es {
 		ent.Term = r.Term
 		ent.Index = last + 1 + uint64(i)
 	}
+	DPrintf("append entry...peerId:%d,es:+%v", r.id, es)
+	r.RaftLog.append(es...)
 }
 
 // handleAppendEntries handle AppendEntries RPC request
@@ -463,23 +471,15 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		})
 		return
 	}
-	//TODO:日志校验
-	if r.State != StateFollower {
-		r.becomeFollower(m.Term, m.From)
-	}
-	r.send(pb.Message{
-		To:      m.From,
-		MsgType: pb.MessageType_MsgAppendResponse,
-		Index:   m.Index,
-		Reject:  false,
-	})
 	//并发/重试导致commit idx已经更新
-	/**
 	if m.Index < r.RaftLog.committed {
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: r.RaftLog.committed})
 		return
 	}
 	if ok := r.RaftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+		if r.State != StateFollower {
+			r.becomeFollower(m.Term, m.From)
+		}
 		r.send(pb.Message{To: m.From, MsgType: pb.MessageType_MsgAppendResponse, Index: m.Index})
 	} else {
 		//这里还需要有加速冲突解决的逻辑
@@ -488,10 +488,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			MsgType: pb.MessageType_MsgAppendResponse,
 			Index:   m.Index,
 			Reject:  true,
-			//LogTerm: hintTerm,
 		})
 	}
-	*/
 }
 
 // handleHeartbeat handle Heartbeat RPC request
