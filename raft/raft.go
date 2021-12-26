@@ -342,6 +342,11 @@ func (r *Raft) becomeLeader() {
 	DPrintf("role change...peerId:%d,role:Leader", r.id)
 	r.Lead = r.id
 	r.State = StateLeader
+	//写NOOP
+	emptyEnt := pb.Entry{Data: nil}
+	r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgPropose,
+		Entries: []*pb.Entry{&emptyEnt}})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -361,6 +366,8 @@ func (r *Raft) Step(m pb.Message) error {
 
 func (r *Raft) stepLeader(m pb.Message) error {
 	switch m.MsgType {
+	case pb.MessageType_MsgPropose:
+		r.handleMsgPropose(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgBeat:
@@ -413,6 +420,23 @@ func (r *Raft) stepFollower(m pb.Message) error {
 		r.handleAppendEntries(m)
 	}
 	return nil
+}
+
+//写入log到本地
+func (r *Raft) handleMsgPropose(m pb.Message) {
+	if r.State != StateLeader {
+		return
+	}
+	r.appendEntry(m.Entries)
+}
+
+func (r *Raft) appendEntry(ents []*pb.Entry) {
+	//统一生成term和index
+	last := r.RaftLog.LastIndex()
+	for i, ent := range ents {
+		ent.Term = r.Term
+		ent.Index = last + 1 + uint64(i)
+	}
 }
 
 // handleAppendEntries handle AppendEntries RPC request
