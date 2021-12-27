@@ -220,6 +220,7 @@ func (r *Raft) resetRandomElectionTimeout() {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	DPrintf("log replicate...from:%d,to:%d", r.id, to)
 	progress := r.Prs[to]
 	preLogIdx := progress.Next - 1
 	preLogTerm, _ := r.RaftLog.Term(preLogIdx)
@@ -372,7 +373,9 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgBeat:
 		for peerId := range r.Prs {
-			r.sendHeartbeat(peerId)
+			if peerId != r.id {
+				r.sendHeartbeat(peerId)
+			}
 		}
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResp(m)
@@ -382,6 +385,8 @@ func (r *Raft) stepLeader(m pb.Message) error {
 		r.handleRequestVoteResp(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
+	case pb.MessageType_MsgAppendResponse:
+		r.handleMsgAppendResponse(m)
 	}
 	return nil
 }
@@ -450,6 +455,7 @@ func (r *Raft) appendEntry(es []*pb.Entry) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	DPrintf("handle log replicate...peerId:%d,from:%d,msg:+%v", r.id, m.From, m)
 	if m.Term < r.Term {
 		r.send(pb.Message{
 			To:      m.From,
@@ -489,6 +495,39 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			Index:   m.Index,
 			Reject:  true,
 		})
+	}
+}
+
+func (r *Raft) handleMsgAppendResponse(m pb.Message) {
+	DPrintf("handle msg append response...peerId:%d,msg:%+v", r.id, m)
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, m.From)
+		return
+	}
+	if !m.Reject {
+		progress := r.Prs[m.From]
+		//delay msg
+		if m.Index <= progress.Match {
+			return
+		}
+		//更新match index和next index
+		progress.Match = m.Index
+		progress.Next = progress.Match + 1
+		//检查其他节点的match index，判断是否需要更新commit
+		mp := make(map[uint64]int)
+		for _, p := range r.Prs {
+			mp[p.Match]++
+		}
+		peerSize := len(r.Prs) + 1
+		for idx, cnt := range mp {
+			//超过半数结点同步成功则更新commit
+			if cnt+1 > peerSize/2 && idx > r.RaftLog.committed {
+				DPrintf("update commit idx...peerId:%d,commitIdx:%d", r.id, idx)
+				r.RaftLog.committed = idx
+			}
+		}
+	} else {
+		//TODO:日志冲突的场景
 	}
 }
 
