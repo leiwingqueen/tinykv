@@ -519,11 +519,17 @@ func (r *Raft) handleMsgAppendResponse(m pb.Message) {
 			mp[p.Match]++
 		}
 		peerSize := len(r.Prs) + 1
+		//figure 8里面有提到，更新commit的term必须是当前leader的任期
 		for idx, cnt := range mp {
 			//超过半数结点同步成功则更新commit
-			if cnt+1 > peerSize/2 && idx > r.RaftLog.committed {
+			if logTerm, _ := r.RaftLog.Term(idx); cnt+1 > peerSize/2 && idx > r.RaftLog.committed &&
+				//figure 8要求的内容
+				logTerm == r.Term {
 				DPrintf("update commit idx...peerId:%d,commitIdx:%d", r.id, idx)
 				r.RaftLog.committed = idx
+				//更新unstable
+				//r.RaftLog.stabled = idx
+				//r.RaftLog.entries = r.RaftLog.slice(idx+1, r.RaftLog.LastIndex()+1)
 			}
 		}
 	} else {

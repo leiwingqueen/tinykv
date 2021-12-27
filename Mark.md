@@ -18,3 +18,6 @@ RaftLog定义了一个stabled的东西，这个在mit6.824是没有的。
 - 代码上更简洁(虽然会提高理解成本)
 - 减少锁冲突(mit的课程data race的处理就很痛苦，还可能不小心就会造成一个dead lock)
 - 方便测试，网络通讯的逻辑从raft的逻辑中剥离，测试就可以直接通过一个简单的step来模拟整个状态机的驱动
+
+## 参考
+[TinyKV2A文档 raft的选举和日志复制](https://zhuanlan.zhihu.com/p/441305508)
